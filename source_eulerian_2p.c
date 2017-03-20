@@ -1,4 +1,4 @@
-#include  "udf.h"
+#include "udf.h"
 #include "stdlib.h"
 
 //zone index
@@ -90,7 +90,7 @@ DEFINE_SOURCE(source_sl, c, t, dS, eqn)
     por = C_POR(c, t);									//porosity
     sat = C_VOF(c, t);									//liquid saturation					
     
-    Message("sat=%g\n", sat);
+    //Message("sat=%g\n", sat);
 
 	domain = Get_Domain(mixture_domain_ID);
 	t_solid = Lookup_Thread(domain, bed_solid_zone_ID);
@@ -241,9 +241,23 @@ DEFINE_SOURCE(source_solid, c, t, dS, eqn)
 		Asi = Area_i(por, sat);
 		hsi = HTC_boiling(c, t_liq, t_vap, Tsat, Ts);
 		Qsi = -hsi*Asi*(Ts - Tsat);
+
+		Message("alpha=%g\n", alpha);
+		Message("sat=%g\n", sat);
+		//Message("Asi=%g\n", Asi);
+		//Message("hsi=%g\n", hsi);
+		Message("Ts=%g\n", Ts);
+		Message("Tsat=%g\n", Tsat);
+
 	}
 	else
 		Qsi = 0.0;
+
+	Message("Qsi=%g\n", Qsi);
+
+	//hz
+	Qsi = 0.0;
+	//hz
 
 	//source_4: decay heat power
 	Qdecay = Decay_power();
@@ -277,6 +291,8 @@ DEFINE_SOURCE(source_il, c, t, dS, eqn)
 
 	source = -Qil;
 
+	Message("Qil=%g\n", Qil);
+
 	dS[eqn] = 0.0;
 
 	return source;
@@ -293,6 +309,8 @@ DEFINE_SOURCE(source_ig, c, t, dS, eqn)
 	source_intf_fluid(c, t, &Qil, &Qig);
 
 	source = -Qig;
+
+	Message("Qig=%g\n", Qig);
 
 	dS[eqn] = 0.0;
 
@@ -473,10 +491,19 @@ real HTC_boiling(cell_t c, Thread *t_liq, Thread *t_vap, real Tsat, real Ts)
 		W = (Ts - Tmin_FB)/(Tmax_PB - Tmin_FB);
 	}
 
+	//Message("Tmin_FB=%g\n", Tmin_FB);
+	//Message("Tmax_PB=%g\n", Tmax_PB);	
+	//Message("W=%g\n", W);
+
 	h_PB = HTC_PB(c, t_liq, t_vap, Tsat, Ts);
 	h_FB = HTC_FB(c, t_liq, t_vap, Tsat, Ts);
 
+	//Message("h_PB=%g\n", h_PB);
+	//Message("h_FB=%g\n", h_FB);
+
 	h = (1.0 - W)*h_PB + W*h_FB;
+
+	//Message("h=%g\n", h);
 
 	return h;
 }
@@ -532,7 +559,7 @@ real HTC_FB(cell_t c, Thread *t_liq, Thread *t_vap, real Tsat, real Ts)
 {
 	//film boiling, Lienhard correlation
 	const real C = 0.67;
-	const int n = 0.25;
+	const real n = 0.25;
 
 	real h;									//HTC, W/(m2-K)
 	real miu_g;								//dynamic viscosity of vapor, kg/(m-s)
@@ -579,6 +606,20 @@ real HTC_FB(cell_t c, Thread *t_liq, Thread *t_vap, real Tsat, real Ts)
 
 	h = Nu*k_g/Dp;
 
+	/*
+	Message("Filim boiling HTC\n");
+	Message("miu_g=%g\n", miu_g);
+	Message("k_g=%g\n", k_g);
+	Message("Cp_g=%g\n", Cp_g);
+	Message("Pr_g=%g\n", Pr_g);
+	Message("Ja=%g\n", Ja);
+	Message("Hfg_m=%g\n", Hfg_m);
+	Message("x=%g\n", x);
+	Message("Nu=%g\n", Nu);
+	Message("h=%g\n", h);
+	*/
+	
+
 	return h;
 }
 
@@ -613,13 +654,18 @@ void HTC_bubbly(cell_t c, Thread *t, real D_B, real *h_l, real *h_g)
 	t_vap = THREAD_SUB_THREAD(t_mix, vap_phase_ID);
 
 	//liquid properties
-	rho_l = C_R(c, t_liq);
+	//rho_l = C_R(c, t_liq);
 	Cp_l = C_CP(c, t_liq);
 	k_l = C_K_L(c, t_liq);
 	miu_l = C_MU_L(c, t_liq);				//laminar dynamic viscosity
 
 	//vapor properties
 	k_g = C_K_L(c, t_vap);
+
+	//saturation properties (fluid is saturated)
+	//For the sake of simplicity, following saturated properties are set to be constant obtained from other application
+	//saturation condition P = 1.01325e5 Pa
+	rho_l = 958.3727;
 
 	//for liquid
 	ul = C_U(c, t_liq);
@@ -633,12 +679,27 @@ void HTC_bubbly(cell_t c, Thread *t, real D_B, real *h_l, real *h_g)
 	Pr_l = Cp_l*miu_l/k_l;
 	Nu_l = 2.0 + 0.6*sqrt(Re_rel_l)*pow(Pr_l, 0.33333);
 
+	Message("\nHTC_bubbly\n");
+	Message("rho_l=%g\n", rho_l);
+	Message("ul=%g\n", ul);
+	Message("ug=%g\n", ug);
+	Message("vl=%g\n", vl);
+	Message("vg=%g\n", vg);
+	Message("Re_rel_l=%g\n", Re_rel_l);
+	Message("Pr_l=%g\n", Pr_l);
+	Message("Nu_l=%g\n", Nu_l);
+
+
 	//for vapor
 	Nu_g = 10.0;
 
 	//
 	*h_l = Nu_l*k_l/D_B;
 	*h_g = Nu_g*k_g/D_B;
+
+	Message("h_l_B=%g\n", *h_l);
+	Message("h_g_B=%g\n", *h_g);
+
 }
 
 
@@ -688,6 +749,7 @@ void HTC_droplet(cell_t c, Thread *t, real D_D, real *h_l, real *h_g)
 	ul = C_U(c, t_liq);
 	ug = C_U(c, t_vap);
 	vl = C_V(c, t_liq);
+
 	vg = C_V(c, t_vap);
 	urel = ul - ug;
 	vrel = vl - vg;
@@ -696,9 +758,23 @@ void HTC_droplet(cell_t c, Thread *t, real D_D, real *h_l, real *h_g)
 	Pr_g = Cp_g*miu_g/k_g;
 	Nu_g = 2.0 + 0.738*sqrt(Re_rel_g)*pow(Pr_g, 0.33333);
 
+
+	Message("\nHTC_droplet\n");
+	Message("rho_g=%g\n", rho_g);
+	Message("ul=%g\n", ul);
+	Message("ug=%g\n", ug);
+	Message("vl=%g\n", vl);
+	Message("vg=%g\n", vg);
+	Message("Re_rel_g=%g\n", Re_rel_g);
+	Message("Pr_g=%g\n", Pr_g);
+	Message("Nu_g=%g\n", Nu_g);
+
 	//
 	*h_l = Nu_l*k_l/D_D;
 	*h_g = Nu_g*k_g/D_D;
+
+	Message("h_l_D=%g\n", *h_l);
+	Message("h_g_D=%g\n", *h_g);
 	
 }
 
@@ -770,6 +846,16 @@ void source_intf_fluid(cell_t c, Thread *t, real *Qil, real *Qig)
 			*Qil = area_B*hl_B*(Tl - Tsat);
 			*Qig = area_B*hg_B*(Tg - Tsat);
 
+			Message("\nbubbly flow\n");
+			Message("Tl=%g\n", Tl);
+			Message("Tg=%g\n", Tg);
+			Message("Tsat=%g\n", Tsat);
+			Message("area_B=%g\n", area_B);
+			Message("hl_B=%g\n", hl_B);
+			Message("hg_B=%g\n", hg_B);
+			Message("Qil_B=%g\n", *Qil);
+			Message("Qig_B=%g\n", *Qig);
+
 		}
 		else if(sat < slim_D)
 		{
@@ -780,6 +866,16 @@ void source_intf_fluid(cell_t c, Thread *t, real *Qil, real *Qig)
 
 			*Qil = area_D*hl_D*(Tl - Tsat);
 			*Qig = area_D*hg_D*(Tg - Tsat);
+
+			Message("\ndroplet flow\n");
+			Message("Tl=%g\n", Tl);
+			Message("Tg=%g\n", Tg);
+			Message("Tsat=%g\n", Tsat);
+			Message("area_D=%g\n", area_D);
+			Message("hl_D=%g\n", hl_D);
+			Message("hg_D=%g\n", hg_D);
+			Message("Qil_D=%g\n", *Qil);
+			Message("Qig_D=%g\n", *Qig);
 		}
 		else
 		{
@@ -805,6 +901,23 @@ void source_intf_fluid(cell_t c, Thread *t, real *Qil, real *Qig)
 			//total heat power
 			*Qil = Qil_B + Qil_D;
 			*Qig = Qig_B + Qig_D;
+
+			Message("\ntransition region\n");
+			Message("Z_B=%g\n", Z_B);
+			Message("Z_D=%g\n", Z_D);
+			Message("area_B=%g\n", area_B);
+			Message("area_D=%g\n", area_D);
+			Message("Tl=%g\n", Tl);
+			Message("Tg=%g\n", Tg);
+			Message("Tsat=%g\n", Tsat);
+			Message("Qil_B=%g\n", Qil_B);
+			Message("Qig_B=%g\n", Qig_B);
+			Message("Qil_D=%g\n", Qil_D);
+			Message("Qig_D=%g\n", Qig_D);
+			Message("Qil_T=%g\n", *Qil);
+			Message("Qig_T=%g\n", *Qig);
+
+
 		}
 	}
 	else
