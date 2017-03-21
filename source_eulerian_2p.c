@@ -1,9 +1,11 @@
 #include "udf.h"
+#include "stdio.h"
 #include "stdlib.h"
 
 //zone index
-#define bed_fluid_zone_ID 2
-#define bed_solid_zone_ID 4
+#define bed_fluid_zone_ID 3
+#define bed_solid_zone_ID 17
+#define pool_zone_ID 4
 
 //domain index
 #define mixture_domain_ID 1
@@ -17,7 +19,10 @@
 //
 #define Dp 0.98e-3				//particle diameter, m
 #define g 9.81					//gravitational acceleration, m/s2
+#define EPS 1.0e-6				//error tolerance
 
+//
+FILE *fp;
 
 //for direct heat transfer between solid and fluid (liquid & vapor)
 real Fd(real a);
@@ -50,11 +55,19 @@ real Decay_power();
 
 
 //
-DEFINE_ADJUST(init, domain)
+DEFINE_INIT(init, domain)
+{
+	fp = fopen("UDF_var.dat", "w+");
+}
+
+//
+DEFINE_ADJUST(adjust_temp, domain)
 {
 	//save the solid temperature field to UDM-0 at the begining of every iteration
 	Thread *t;
 	cell_t c;
+
+	real flow_time;					//physical flow time/current time, sec
 
 	t = Lookup_Thread(domain, bed_solid_zone_ID);
 
@@ -64,6 +77,15 @@ DEFINE_ADJUST(init, domain)
 		C_UDMI(c, t, 0) = C_UDSI(c, t, 0);
 	}
 	end_c_loop_int(c, t)
+
+	//
+	flow_time = RP_Get_Real("flow-time");
+	fprintf(fp, "Time = %g\n", flow_time);
+}
+
+DEFINE_EXECUTE_AT_EXIT(close_file)
+{
+	fclose(fp);
 }
 
 /******************************************************/
@@ -111,7 +133,7 @@ DEFINE_SOURCE(source_sl, c, t, dS, eqn)
 
     source = -hls*Als*(Tl - Ts);
 
-    //Message("source from liquid=%g\n", source);
+    //Message("direct source from liquid=%g\n", source);
 
     //source for solid zone
     C_UDMI(c, t, 1) = -source;
@@ -163,7 +185,7 @@ DEFINE_SOURCE(source_sg, c, t, dS, eqn)
 
     source = -hgs*Ags*(Tg - Ts);
 
-    //Message("source from vapor=%g\n", source);
+    //Message("direct source from vapor=%g\n", source);
 
     //source for solid zone
     C_UDMI(c, t, 2) = -source;
@@ -236,7 +258,7 @@ DEFINE_SOURCE(source_solid, c, t, dS, eqn)
 	Qsg = C_UDMI(c, t_vap, 2);
 
 	//source_3: heat exchange power between solid and interface (only exists when alpha > 0)
-	if(alpha > 0.0)
+	if(alpha > 0.0  && (Ts-Tsat) > EPS)
 	{
 		Asi = Area_i(por, sat);
 		hsi = HTC_boiling(c, t_liq, t_vap, Tsat, Ts);
@@ -244,19 +266,29 @@ DEFINE_SOURCE(source_solid, c, t, dS, eqn)
 
 		Message("alpha=%g\n", alpha);
 		Message("sat=%g\n", sat);
-		//Message("Asi=%g\n", Asi);
-		//Message("hsi=%g\n", hsi);
+		Message("Asi=%g\n", Asi);
+		Message("hsi=%g\n", hsi);
 		Message("Ts=%g\n", Ts);
 		Message("Tsat=%g\n", Tsat);
+
+		fprintf(fp, "alpha=%g\n", alpha);
+		fprintf(fp, "sat=%g\n", sat);
+		fprintf(fp, "Asi=%g\n", Asi);
+		fprintf(fp, "hsi=%g\n", hsi);
+		fprintf(fp, "Ts=%g\n", Ts);
+		fprintf(fp, "Tsat=%g\n", Tsat);
 
 	}
 	else
 		Qsi = 0.0;
 
-	Message("Qsi=%g\n", Qsi);
+	//Message("Qsi=%g\n", Qsi);
 
 	//hz
-	Qsi = 0.0;
+	//just used for debugging
+	//Qsi = 0.0;
+	//Qsg = 0.0;
+	//Qsl = 0.0;
 	//hz
 
 	//source_4: decay heat power
@@ -267,6 +299,7 @@ DEFINE_SOURCE(source_solid, c, t, dS, eqn)
     Quds = (Qdecay + (Qsl + Qsg +Qsi)/(1.0 - por))/Cp_s;
     C_UDMI(c, t, 3) = Quds;
 	//Message("Quds=%g\n", Quds);
+	//fprintf(fp, "Quds=%g\n", Quds);
 
     source = Quds;
 
@@ -291,7 +324,7 @@ DEFINE_SOURCE(source_il, c, t, dS, eqn)
 
 	source = -Qil;
 
-	Message("Qil=%g\n", Qil);
+	//Message("Qil=%g\n", Qil);
 
 	dS[eqn] = 0.0;
 
@@ -310,7 +343,7 @@ DEFINE_SOURCE(source_ig, c, t, dS, eqn)
 
 	source = -Qig;
 
-	Message("Qig=%g\n", Qig);
+	//Message("Qig=%g\n", Qig);
 
 	dS[eqn] = 0.0;
 
@@ -526,7 +559,7 @@ real HTC_PB(cell_t c, Thread *t_liq, Thread *t_vap, real Tsat, real Ts)
 	real Hg;								//saturated vapor enthalpy, J/kg
 	real Hfg;								//evaporation/latent heat, J/kg
 	real sigma;								//surface tension, N/m
-	real Pr;								//Prandtl number
+	real Pr_l;								//Prandtl number of saturated liquid
 	real dT;								//temperature difference (Ts - Tsat)
 	real dRho;								//density difference (rho_sat_l - rho_sat_g)
 	real buoy;								//buoyance term
@@ -544,12 +577,36 @@ real HTC_PB(cell_t c, Thread *t_liq, Thread *t_vap, real Tsat, real Ts)
 	sigma = 0.0589;							//liquid water of 100C
 
 	Hfg = Hg - Hl;
-	Pr = Cp_l*miu_l/k_l;
+	Pr_l = Cp_l*miu_l/k_l;
 	dT = Ts - Tsat;
 	dRho = rho_l - rho_g; 
 	buoy = sigma/(g*dRho);
 
-	h = pow(Csf, -3.0)*pow(Cp_l, 3.0)*miu_l*(dT*dT)/(Hfg*Hfg*pow(buoy, 0.5)*pow(Pr, n*3.0));
+	h = pow(Csf, -3.0)*pow(Cp_l, 3.0)*miu_l*(dT*dT)/(Hfg*Hfg*pow(buoy, 0.5)*pow(Pr_l, n*3.0));
+
+	/*
+	Message("\nPool boiling HTC\n");
+	Message("miu_l=%g\n", miu_l);
+	Message("k_l=%g\n", k_l);
+	Message("Cp_l=%g\n", Cp_l);
+	Message("Pr_l=%g\n", Pr_l);
+	Message("buoy=%g\n", buoy);
+	Message("Hfg=%g\n", Hfg);
+	Message("h=%g\n", h);
+	Message("\n");
+	*/
+
+	/*
+	fprintf(fp, "\nPool boiling HTC\n");
+	fprintf(fp, "miu_l=%g\n", miu_l);
+	fprintf(fp, "k_l=%g\n", k_l);
+	fprintf(fp, "Cp_l=%g\n", Cp_l);
+	fprintf(fp, "Pr_l=%g\n", Pr_l);
+	fprintf(fp, "buoy=%g\n", buoy);
+	fprintf(fp, "Hfg=%g\n", Hfg);
+	fprintf(fp, "h=%g\n", h);
+	fprintf(fp, "\n");
+	*/
 
 	return h;
 }
@@ -607,7 +664,7 @@ real HTC_FB(cell_t c, Thread *t_liq, Thread *t_vap, real Tsat, real Ts)
 	h = Nu*k_g/Dp;
 
 	/*
-	Message("Filim boiling HTC\n");
+	Message("\nFilim boiling HTC\n");
 	Message("miu_g=%g\n", miu_g);
 	Message("k_g=%g\n", k_g);
 	Message("Cp_g=%g\n", Cp_g);
@@ -617,9 +674,24 @@ real HTC_FB(cell_t c, Thread *t_liq, Thread *t_vap, real Tsat, real Ts)
 	Message("x=%g\n", x);
 	Message("Nu=%g\n", Nu);
 	Message("h=%g\n", h);
+	Message("\n");
+	*/
+
+	/*
+	fprintf(fp, "\nFilim boiling HTC\n");
+	fprintf(fp, "miu_g=%g\n", miu_g);
+	fprintf(fp, "k_g=%g\n", k_g);
+	fprintf(fp, "Cp_g=%g\n", Cp_g);
+	fprintf(fp, "Pr_g=%g\n", Pr_g);
+	fprintf(fp, "Ja=%g\n", Ja);
+	fprintf(fp, "Hfg_m=%g\n", Hfg_m);
+	fprintf(fp, "x=%g\n", x);
+	fprintf(fp, "Nu=%g\n", Nu);
+	fprintf(fp, "h=%g\n", h);
+	fprintf(fp, "\n");
 	*/
 	
-
+	
 	return h;
 }
 
@@ -679,6 +751,7 @@ void HTC_bubbly(cell_t c, Thread *t, real D_B, real *h_l, real *h_g)
 	Pr_l = Cp_l*miu_l/k_l;
 	Nu_l = 2.0 + 0.6*sqrt(Re_rel_l)*pow(Pr_l, 0.33333);
 
+	/*
 	Message("\nHTC_bubbly\n");
 	Message("rho_l=%g\n", rho_l);
 	Message("ul=%g\n", ul);
@@ -688,6 +761,7 @@ void HTC_bubbly(cell_t c, Thread *t, real D_B, real *h_l, real *h_g)
 	Message("Re_rel_l=%g\n", Re_rel_l);
 	Message("Pr_l=%g\n", Pr_l);
 	Message("Nu_l=%g\n", Nu_l);
+	*/
 
 
 	//for vapor
@@ -697,8 +771,8 @@ void HTC_bubbly(cell_t c, Thread *t, real D_B, real *h_l, real *h_g)
 	*h_l = Nu_l*k_l/D_B;
 	*h_g = Nu_g*k_g/D_B;
 
-	Message("h_l_B=%g\n", *h_l);
-	Message("h_g_B=%g\n", *h_g);
+	//Message("h_l_B=%g\n", *h_l);
+	//Message("h_g_B=%g\n", *h_g);
 
 }
 
@@ -758,7 +832,7 @@ void HTC_droplet(cell_t c, Thread *t, real D_D, real *h_l, real *h_g)
 	Pr_g = Cp_g*miu_g/k_g;
 	Nu_g = 2.0 + 0.738*sqrt(Re_rel_g)*pow(Pr_g, 0.33333);
 
-
+	/*
 	Message("\nHTC_droplet\n");
 	Message("rho_g=%g\n", rho_g);
 	Message("ul=%g\n", ul);
@@ -768,13 +842,14 @@ void HTC_droplet(cell_t c, Thread *t, real D_D, real *h_l, real *h_g)
 	Message("Re_rel_g=%g\n", Re_rel_g);
 	Message("Pr_g=%g\n", Pr_g);
 	Message("Nu_g=%g\n", Nu_g);
+	*/
 
 	//
 	*h_l = Nu_l*k_l/D_D;
 	*h_g = Nu_g*k_g/D_D;
 
-	Message("h_l_D=%g\n", *h_l);
-	Message("h_g_D=%g\n", *h_g);
+	//Message("h_l_D=%g\n", *h_l);
+	//Message("h_g_D=%g\n", *h_g);
 	
 }
 
@@ -820,21 +895,21 @@ void source_intf_fluid(cell_t c, Thread *t, real *Qil, real *Qig)
 
 	sat = C_VOF(c, t_liq);
 
-	if(sat > 0.0)
+	Tl = C_T(c, t_liq);
+	Tg = C_T(c, t_vap);
+	por = C_POR(c, t_liq);
+	P_op = RP_Get_Real("operating-pressure");
+	Pmix = C_P(c, t_mix) + P_op;    
+	Tsat = Tsat_fit(Pmix);						//saturation temperature of fluid computed by fitting function
+												//getsatvalues_NIST(index, Pmix, y) doesn't work
+
+	if(sat < 1.0 && Tl > Tsat && Tg > Tsat)
 	{
 		//only exists when it is two-phase flow condition, in which heat is transferred betweeen solid and fluid via interface
 		//flow pattern:
 		//		- Bubbly flow
 		//		- Transition region
 		//		- Droplet flow
-
-		Tl = C_T(c, t_liq);
-		Tg = C_T(c, t_vap);
-		por = C_POR(c, t_liq);
-		P_op = RP_Get_Real("operating-pressure");
-		Pmix = C_P(c, t_mix) + P_op;    
-		Tsat = Tsat_fit(Pmix);					//saturation temperature of fluid computed by fitting function
-												//getsatvalues_NIST(index, Pmix, y) doesn't work
 
 		if(sat > slim_B)
 		{
@@ -846,6 +921,7 @@ void source_intf_fluid(cell_t c, Thread *t, real *Qil, real *Qig)
 			*Qil = area_B*hl_B*(Tl - Tsat);
 			*Qig = area_B*hg_B*(Tg - Tsat);
 
+			/*
 			Message("\nbubbly flow\n");
 			Message("Tl=%g\n", Tl);
 			Message("Tg=%g\n", Tg);
@@ -855,6 +931,7 @@ void source_intf_fluid(cell_t c, Thread *t, real *Qil, real *Qig)
 			Message("hg_B=%g\n", hg_B);
 			Message("Qil_B=%g\n", *Qil);
 			Message("Qig_B=%g\n", *Qig);
+			*/
 
 		}
 		else if(sat < slim_D)
@@ -867,6 +944,7 @@ void source_intf_fluid(cell_t c, Thread *t, real *Qil, real *Qig)
 			*Qil = area_D*hl_D*(Tl - Tsat);
 			*Qig = area_D*hg_D*(Tg - Tsat);
 
+			/*
 			Message("\ndroplet flow\n");
 			Message("Tl=%g\n", Tl);
 			Message("Tg=%g\n", Tg);
@@ -876,6 +954,7 @@ void source_intf_fluid(cell_t c, Thread *t, real *Qil, real *Qig)
 			Message("hg_D=%g\n", hg_D);
 			Message("Qil_D=%g\n", *Qil);
 			Message("Qig_D=%g\n", *Qig);
+			*/
 		}
 		else
 		{
@@ -902,6 +981,7 @@ void source_intf_fluid(cell_t c, Thread *t, real *Qil, real *Qig)
 			*Qil = Qil_B + Qil_D;
 			*Qig = Qig_B + Qig_D;
 
+			/*
 			Message("\ntransition region\n");
 			Message("Z_B=%g\n", Z_B);
 			Message("Z_D=%g\n", Z_D);
@@ -916,7 +996,7 @@ void source_intf_fluid(cell_t c, Thread *t, real *Qil, real *Qig)
 			Message("Qig_D=%g\n", Qig_D);
 			Message("Qil_T=%g\n", *Qil);
 			Message("Qig_T=%g\n", *Qig);
-
+			*/
 
 		}
 	}
